@@ -1,0 +1,87 @@
+name: Download Dukascopy Ticks
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: "Symbol (e.g. EURUSD, XAUUSD)"
+        required: true
+        default: "EURUSD"
+      start:
+        description: "Start date/time UTC (YYYY-MM-DD or YYYY-MM-DD HH:MM)"
+        required: true
+      end:
+        description: "End date/time UTC (exclusive)"
+        required: true
+  schedule:
+    # Every day at 02:00 UTC — downloads the previous day for symbols listed in SCHEDULED_SYMBOLS
+    - cron: "0 2 * * *"
+
+env:
+  SCHEDULED_SYMBOLS: "EURUSD GBPUSD XAUUSD"
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - run: pip install -r scripts/requirements.txt
+
+      - name: Download (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          mkdir -p data
+          python scripts/dukascopy_ticks.py "${{ inputs.symbol }}" "${{ inputs.start }}" "${{ inputs.end }}" \
+            -o "data/${{ inputs.symbol }}.csv"
+
+      - name: Download (scheduled, previous day)
+        if: github.event_name == 'schedule'
+        run: |
+          mkdir -p data
+          START=$(date -u -d "yesterday" +%F)
+          END=$(date -u +%F)
+          for SYMBOL in $SCHEDULED_SYMBOLS; do
+            python scripts/dukascopy_ticks.py "$SYMBOL" "$START" "$END" -o "data/${SYMBOL}_${START}.csv"
+          done
+
+      - name: Build release name and zip CSVs
+        id: pack
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            START=$(echo "${{ inputs.start }}" | cut -d' ' -f1)
+            END=$(echo "${{ inputs.end }}" | cut -d' ' -f1)
+            TAG="ticks-${{ inputs.symbol }}-${START}_${END}"
+            TITLE="${{ inputs.symbol }} ticks ${START} to ${END}"
+          else
+            DAY=$(date -u -d "yesterday" +%F)
+            TAG="ticks-daily-${DAY}"
+            TITLE="Daily ticks ${DAY} (${SCHEDULED_SYMBOLS})"
+          fi
+          ZIP="${TAG}.zip"
+          zip -j -9 "$ZIP" data/*.csv
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          ls -lh "$ZIP"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pack.outputs.tag }}
+          name: ${{ steps.pack.outputs.title }}
+          files: ${{ steps.pack.outputs.zip }}
+          body: |
+            Dukascopy tick data exported by GitHub Actions.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
